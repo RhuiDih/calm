@@ -21,7 +21,13 @@ from model import layers
 from model import utils
 import torch
 import transformers
-
+from transformers.cache_utils import Cache, DynamicCache, SlidingWindowCache, StaticCache
+from transformers.modeling_outputs import (
+    BaseModelOutputWithPast,
+    CausalLMOutputWithPast,
+    SequenceClassifierOutputWithPast,
+    TokenClassifierOutput,
+)
 
 class CALMConfig(transformers.PretrainedConfig):
   """CALM configuration.
@@ -112,20 +118,18 @@ class CALM(transformers.PreTrainedModel):
       config.aug_config = transformers.AutoConfig.from_pretrained(
           config.aug_model
       )
-    if isinstance(config.anchor_config, dict):
-      config.anchor_config = transformers.GemmaConfig.from_dict(
-          config.anchor_config
-      )
-    if isinstance(config.aug_config, dict):
-      config.aug_config = transformers.GemmaConfig.from_dict(config.aug_config)
 
     self.anchor_model = transformers.AutoModelForCausalLM.from_pretrained(
         config.anchor_model,
         config=config.anchor_config,
+        torch_dtype=torch.bfloat16,
+        attn_implementation="flash_attention_2"
     )
     self.aug_model = transformers.AutoModelForCausalLM.from_pretrained(
         config.aug_model,
         config=config.aug_config,
+        torch_dtype=torch.bfloat16,
+        attn_implementation="flash_attention_2"
     )
     self.vocab_size = self.anchor_model.config.vocab_size
     self.config = config
@@ -189,43 +193,25 @@ class CALM(transformers.PreTrainedModel):
 
     for cross_attention_hook in self.cross_attention_hooks:
       cross_attention_hook.aug_hidden_state = None
-      cross_attention_hook.aug_mask = None
       cross_attention_hook.attn_weights = None
     for extract_hidden_state_hook in self.extract_hidden_state_hooks.values():
       extract_hidden_state_hook.hidden_state = None
 
   def _forward_aug(
-      self,
-      input_ids: torch.LongTensor = None,
-      attention_mask: Optional[torch.Tensor] = None,
-      position_ids: Optional[torch.LongTensor] = None,
-      past_key_values: Optional[
-          Union[transformers.Cache, List[torch.FloatTensor]]
-      ] = None,
-      inputs_embeds: Optional[torch.FloatTensor] = None,
-      labels: Optional[torch.LongTensor] = None,
-      use_cache: Optional[bool] = True,
-      output_attentions: Optional[bool] = None,
-      output_hidden_states: Optional[bool] = None,
-      return_dict: Optional[bool] = None,
-      cache_position: Optional[torch.LongTensor] = None,
+    self,
+    input_ids: torch.LongTensor = None,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
+    inputs_embeds: Optional[torch.FloatTensor] = None,
+    labels: Optional[torch.LongTensor] = None,
+    use_cache: Optional[bool] = None,
+    output_attentions: Optional[bool] = None,
+    output_hidden_states: Optional[bool] = None,
+    return_dict: Optional[bool] = None,
+    cache_position: Optional[torch.LongTensor] = None,
   ):
     """Forwards the sequence through the augmented model.
-
-    Args:
-      input_ids: Input sequence.
-      attention_mask: Input sequence mask.
-      position_ids: Position ids.
-      past_key_values: Past key values.
-      inputs_embeds: Input embeddings.
-      labels: Labels. If None, the model will be used in inference mode. If
-        labels are provided, the model will be used in training mode.
-      use_cache: Use cache.
-      output_attentions: Output attentions.
-      output_hidden_states: Output hidden states.
-      return_dict: Return dict. If True, the output will be a dict. If False,
-        the output will be a tuple.
-      cache_position: Cache position.
 
     Returns:
       output: Output of the augmented model.
@@ -257,43 +243,24 @@ class CALM(transformers.PreTrainedModel):
         self.cross_attention_hooks[connection_idx].aug_hidden_state = (
             aug_hidden_state
         )
-        self.cross_attention_hooks[connection_idx].aug_mask = attention_mask
         del aug_hidden_state
     return output
 
   def forward(
-      self,
-      input_ids: torch.LongTensor = None,
-      attention_mask: Optional[torch.Tensor] = None,
-      position_ids: Optional[torch.LongTensor] = None,
-      past_key_values: Optional[
-          Union[transformers.Cache, List[torch.FloatTensor]]
-      ] = None,
-      inputs_embeds: Optional[torch.FloatTensor] = None,
-      labels: Optional[torch.LongTensor] = None,
-      use_cache: Optional[bool] = True,
-      output_attentions: Optional[bool] = None,
-      output_hidden_states: Optional[bool] = None,
-      return_dict: Optional[bool] = None,
-      cache_position: Optional[torch.LongTensor] = None,
-  ):
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+    ) -> Union[Tuple, CausalLMOutputWithPast]:
     """CALM forward pass.
-
-    Args:
-      input_ids: Input sequence.
-      attention_mask: Input sequence mask.
-      position_ids: Position ids.
-      past_key_values: Past key values.
-      inputs_embeds: Input embeddings.
-      labels: Labels. If None, the model will be used in inference mode. If
-        labels are provided, the model will be used in training mode.
-      use_cache: Use cache.
-      output_attentions: Output attentions.
-      output_hidden_states: Output hidden states.
-      return_dict: Return dict. If True, the output will be a dict. If False,
-        the output will be a tuple.
-      cache_position: Cache position.
-
     Returns:
       The output of the CALM model. If labels are provided, the output
       will be the loss. If labels are not provided, the output will be the
@@ -316,11 +283,11 @@ class CALM(transformers.PreTrainedModel):
         past_key_values=past_key_values,
         inputs_embeds=inputs_embeds,
         labels=labels,
-        use_cache=use_cache,
         output_attentions=output_attentions,
         output_hidden_states=output_hidden_states,
         return_dict=return_dict,
         cache_position=cache_position,
+        use_cache=use_cache
         )
     del aug_output
 
@@ -331,11 +298,11 @@ class CALM(transformers.PreTrainedModel):
         past_key_values=past_key_values,
         inputs_embeds=inputs_embeds,
         labels=labels,
-        use_cache=use_cache,
         output_attentions=output_attentions,
         output_hidden_states=output_hidden_states,
         return_dict=return_dict,
         cache_position=cache_position,
+        use_cache=use_cache
     )
     return output
 

@@ -100,7 +100,6 @@ class CrossAttentionHook(torch.nn.Module):
         batch_first=True,
     )
     self.aug_hidden_state = None
-    self.aug_mask = None
     self.attn_weights = None
 
   def forward(self, *hook_args):
@@ -123,11 +122,9 @@ class CrossAttentionHook(torch.nn.Module):
     """
     query, output = process_hook_args(*hook_args)
     assert self.aug_hidden_state is not None
-    assert self.aug_mask is not None
     key = self.proj(self.aug_hidden_state)
     value = self.proj(self.aug_hidden_state)
 
-    self.aug_mask = self.aug_mask.float()
     attn_output, attn_weights = self.cross_attention(
         query, key, value, need_weights=True
     )
